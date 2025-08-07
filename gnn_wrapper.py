@@ -76,9 +76,16 @@ class GNNTrainingWrapper:
             edge_labels=edge_labels_sub
         )
         
-        # Store the node mask for heterogeneous models
+        # Store the node mask and mapping for heterogeneous models
         subgraph_data.node_mask = node_mask
+        subgraph_data.mapping = mapping  # This maps original node indices to subgraph indices
+        subgraph_data.edge_mask = edge_mask  # This maps original edge indices to subgraph edges
         subgraph_data.original_num_nodes = data.num_nodes
+        
+        # Store the original edge indices that are included in the subgraph
+        # This is crucial for mapping target edges back to subgraph edges
+        original_edge_indices = torch.where(edge_mask)[0]
+        subgraph_data.original_edge_indices = original_edge_indices
         
         return subgraph_data
     
@@ -305,27 +312,34 @@ class GNNTrainingWrapper:
                 else:
                     out = model(subgraph_data.x, subgraph_data.edge_index, subgraph_data.edge_attr)
                 
+                # Get predictions for all edges in the subgraph
                 batch_predictions = torch.softmax(out, dim=1)
                 batch_probs = batch_predictions[:, 1].cpu().numpy()
                 batch_preds = torch.argmax(batch_predictions, dim=1).cpu().numpy()
                 
-                # We need to map back to only the target edges
-                # The subgraph contains all edges in the k-hop neighborhood, but we only want the original target edges
-                # Find which edges in the subgraph correspond to our target edges
+                # Map predictions back to only the target edges
                 target_edge_mask = self._get_target_edge_mask_in_subgraph(full_data, subgraph_data, batch_indices)
                 
                 if target_edge_mask is not None and np.any(target_edge_mask):
                     # Only keep predictions for the target edges
                     batch_probs = batch_probs[target_edge_mask]
                     batch_preds = batch_preds[target_edge_mask]
-                    print(f"  Subgraph had {len(batch_probs)} target edges out of {len(target_edge_mask)} total edges")
                 else:
-                    print(f"  Warning: Could not map target edges or no target edges found, using all {len(batch_probs)} predictions")
                     # If we can't map target edges, we need to ensure we have the right number of predictions
-                    # This is a fallback - ideally we should have the correct mapping
-                    if len(batch_probs) != len(batch_indices):
-                        print(f"  Warning: Prediction count mismatch. Expected {len(batch_indices)}, got {len(batch_probs)}")
-                        # Take only the first len(batch_indices) predictions as fallback
+                    # This is a critical issue - we should have the correct mapping
+                    print(f"  Error: Could not map target edges. Expected {len(batch_indices)} target edges.")
+                    print(f"  Subgraph has {len(batch_probs)} edges total.")
+                    
+                    # Try to create a proper mapping by finding the exact target edges in the subgraph
+                    target_edge_mask = self._create_exact_target_edge_mapping(full_data, subgraph_data, batch_indices)
+                    
+                    if target_edge_mask is not None and np.any(target_edge_mask):
+                        batch_probs = batch_probs[target_edge_mask]
+                        batch_preds = batch_preds[target_edge_mask]
+                        print(f"  Successfully mapped {len(batch_probs)} target edges")
+                    else:
+                        # Last resort: use the first len(batch_indices) predictions
+                        print(f"  Warning: Using first {len(batch_indices)} predictions as fallback")
                         batch_probs = batch_probs[:len(batch_indices)]
                         batch_preds = batch_preds[:len(batch_indices)]
                 
@@ -334,7 +348,7 @@ class GNNTrainingWrapper:
         
         # Ensure we have the correct number of predictions
         if len(predictions) != len(target_edge_indices):
-            print(f"Warning: Final prediction count mismatch. Expected {len(target_edge_indices)}, got {len(predictions)}")
+            print(f"Error: Final prediction count mismatch. Expected {len(target_edge_indices)}, got {len(predictions)}")
             # Pad or truncate to match expected length
             if len(predictions) < len(target_edge_indices):
                 # Pad with zeros if we have fewer predictions
@@ -366,67 +380,64 @@ class GNNTrainingWrapper:
             return None
             
         try:
-            # Get the original edge indices that are in the subgraph
-            # The subgraph_data.edge_index contains the relabeled node indices
-            # We need to map back to the original edge indices
-            
-            target_edge_mask = []
-            
-            # Create a mapping from subgraph node indices to original node indices
-            if hasattr(subgraph_data, 'node_mask') and subgraph_data.node_mask is not None:
-                # Use the explicit mapping returned by k_hop_subgraph
-                if hasattr(subgraph_data, 'mapping'):
-                    # Use the mapping tensor directly (more reliable)
-                    node_mapping = subgraph_data.mapping
-                else:
-                    # Fallback to using node_mask
-                    node_mapping = torch.where(subgraph_data.node_mask)[0]
-            else:
-                # If no node_mask, assume direct mapping (fallback)
-                node_mapping = None
-            
-            # For each edge in the subgraph, check if it corresponds to a target edge
-            for i in range(subgraph_data.edge_index.shape[1]):
-                subgraph_source, subgraph_target = subgraph_data.edge_index[:, i].cpu().numpy()
-                
-                # Map back to original node indices
-                if node_mapping is not None:
-                    try:
-                        # Ensure indices are within bounds
-                        if (subgraph_source < len(node_mapping) and subgraph_target < len(node_mapping)):
-                            original_source = node_mapping[subgraph_source].item()
-                            original_target = node_mapping[subgraph_target].item()
-                        else:
-                            # Skip this edge if indices are out of bounds
-                            target_edge_mask.append(False)
-                            continue
-                    except (IndexError, RuntimeError) as e:
-                        # If mapping fails, skip this edge
-                        print(f"Warning: Failed to map edge {i} in subgraph: {e}")
-                        target_edge_mask.append(False)
-                        continue
-                else:
-                    # If no node_mask, assume direct mapping (fallback)
-                    original_source = subgraph_source
-                    original_target = subgraph_target
-                
-                # Check if this edge exists in the original target edges
-                is_target_edge = False
-                for target_idx in target_edge_indices:
-                    orig_source, orig_target = full_data.edge_index[:, target_idx].cpu().numpy()
-                    if (original_source == orig_source and original_target == orig_target) or \
-                       (original_source == orig_target and original_target == orig_source):
-                        is_target_edge = True
-                        break
-                
-                target_edge_mask.append(is_target_edge)
-            
-            return np.array(target_edge_mask)
+            # Use the more robust exact mapping approach
+            return self._create_exact_target_edge_mapping(full_data, subgraph_data, target_edge_indices)
             
         except Exception as e:
             print(f"Error in _get_target_edge_mask_in_subgraph: {e}")
             print("Falling back to using all subgraph edges...")
             # Return None to indicate we should use all edges
+            return None
+    
+    def _create_exact_target_edge_mapping(self, full_data, subgraph_data, target_edge_indices):
+        """
+        Create an exact mapping of target edges in the subgraph.
+        This is a more robust approach that directly maps the target edge indices.
+        
+        Args:
+            full_data: Original full graph data
+            subgraph_data: Subgraph data created by k_hop_subgraph
+            target_edge_indices: Original target edge indices in the full graph
+            
+        Returns:
+            Boolean mask indicating which edges in subgraph_data correspond to target edges
+        """
+        if subgraph_data is None or target_edge_indices is None:
+            return None
+            
+        try:
+            # Get the original edge indices that are included in the subgraph
+            if hasattr(subgraph_data, 'original_edge_indices') and subgraph_data.original_edge_indices is not None:
+                # Use the stored original edge indices
+                original_edge_indices = subgraph_data.original_edge_indices.cpu().numpy()
+            elif hasattr(subgraph_data, 'edge_mask') and subgraph_data.edge_mask is not None:
+                # Fallback to using edge_mask
+                original_edge_indices = torch.where(subgraph_data.edge_mask)[0].cpu().numpy()
+            else:
+                # If no edge_mask, we need to reconstruct it
+                print("Warning: No edge_mask or original_edge_indices found in subgraph_data")
+                return None
+            
+            # Create a mapping from original edge indices to subgraph edge indices
+            original_to_subgraph = {}
+            for subgraph_idx, original_idx in enumerate(original_edge_indices):
+                original_to_subgraph[original_idx] = subgraph_idx
+            
+            # Find which target edges are in the subgraph
+            target_edge_mask = []
+            for i in range(subgraph_data.edge_index.shape[1]):
+                # Check if this subgraph edge corresponds to any target edge
+                is_target_edge = False
+                for target_idx in target_edge_indices:
+                    if target_idx in original_to_subgraph and original_to_subgraph[target_idx] == i:
+                        is_target_edge = True
+                        break
+                target_edge_mask.append(is_target_edge)
+            
+            return np.array(target_edge_mask)
+            
+        except Exception as e:
+            print(f"Error in _create_exact_target_edge_mapping: {e}")
             return None
     
     def demonstrate_production_inference(self, model, full_data, num_test_edges=100):
@@ -1110,9 +1121,18 @@ class GNNTrainingWrapper:
             # Check if we have both source and target nodes
             if len(source_nodes_original) == 0 or len(target_nodes_original) == 0:
                 # Fallback to full graph if subgraph is incomplete
+                source_features_full = torch.tensor(self.source_features, dtype=torch.float).to(device)
+                target_features_full = torch.tensor(self.target_features, dtype=torch.float).to(device)
+                
+                # Ensure 2D tensors (even for single nodes)
+                if source_features_full.ndim == 1:
+                    source_features_full = source_features_full.unsqueeze(0)
+                if target_features_full.ndim == 1:
+                    target_features_full = target_features_full.unsqueeze(0)
+                
                 x_dict = {
-                    'source': torch.tensor(self.source_features, dtype=torch.float).to(device),
-                    'target': torch.tensor(self.target_features, dtype=torch.float).to(device)
+                    'source': source_features_full,
+                    'target': target_features_full
                 }
             else:
                 # Create feature tensors for the nodes in the subgraph
@@ -1121,10 +1141,18 @@ class GNNTrainingWrapper:
                     dtype=torch.float
                 ).to(device)
                 
+                # Ensure 2D tensor (even for single nodes)
+                if source_features_subgraph.ndim == 1:
+                    source_features_subgraph = source_features_subgraph.unsqueeze(0)
+                
                 target_features_subgraph = torch.tensor(
                     self.target_features[target_nodes_original], 
                     dtype=torch.float
                 ).to(device)
+                
+                # Ensure 2D tensor (even for single nodes)
+                if target_features_subgraph.ndim == 1:
+                    target_features_subgraph = target_features_subgraph.unsqueeze(0)
                 
                 x_dict = {
                     'source': source_features_subgraph,
@@ -1132,9 +1160,18 @@ class GNNTrainingWrapper:
                 }
         else:
             # Using full graph
+            source_features_full = torch.tensor(self.source_features, dtype=torch.float).to(device)
+            target_features_full = torch.tensor(self.target_features, dtype=torch.float).to(device)
+            
+            # Ensure 2D tensors (even for single nodes)
+            if source_features_full.ndim == 1:
+                source_features_full = source_features_full.unsqueeze(0)
+            if target_features_full.ndim == 1:
+                target_features_full = target_features_full.unsqueeze(0)
+            
             x_dict = {
-                'source': torch.tensor(self.source_features, dtype=torch.float).to(device),
-                'target': torch.tensor(self.target_features, dtype=torch.float).to(device)
+                'source': source_features_full,
+                'target': target_features_full
             }
         
         # Initialize edge dictionaries

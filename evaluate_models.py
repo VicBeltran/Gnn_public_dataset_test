@@ -308,60 +308,53 @@ class ModelEvaluator:
         return full_data
     
     def evaluate_gnn_model(self, test_data):
-        """Evaluate GNN model"""
+        """Evaluate GNN model using subgraph sampling for realistic inference"""
         if self.gnn_model is None:
             print("✗ GNN model not loaded")
             return None
         
         print("\n" + "="*50)
-        print("EVALUATING GNN MODEL")
+        print("EVALUATING GNN MODEL WITH SUBGRAPH SAMPLING")
         print("="*50)
         
-        # Move test data to device
-        test_data = test_data.to(DEVICE)
+        # Get all edge indices for evaluation
+        all_edge_indices = np.arange(test_data.num_edges)
         
-        # Measure inference time
-        print("Measuring inference time...")
-        num_samples = test_data.num_edges
-        num_runs = 10  # Run multiple times for more accurate timing
+        # Configure subgraph sampling parameters for realistic inference
+        # In production, we'd use 2-3 hops around the target edge
+        self.gnn_wrapper.max_subgraph_size = 500  # Max nodes in subgraph
+        self.gnn_wrapper.num_hops = 2  # 2-hop neighborhood for realistic inference
+        
+        print(f"Using subgraph sampling with {self.gnn_wrapper.num_hops} hops and max {self.gnn_wrapper.max_subgraph_size} nodes")
+        
+        # Measure inference time using subgraph sampling
+        print("Measuring inference time with subgraph sampling...")
+        num_samples = len(all_edge_indices)
+        num_runs = 5  # Fewer runs due to subgraph sampling complexity
         
         # Make predictions based on model type
         self.gnn_model.eval()
         
         # Warm-up run
+        print("Running warm-up inference...")
         with torch.no_grad():
-            if isinstance(self.gnn_model, HeterogeneousEdgeGraphSAGE):
-                x_dict, edge_index_dict, edge_attr_dict = self.gnn_wrapper._create_heterogeneous_data(test_data, DEVICE)
-                _ = self.gnn_model(x_dict, edge_index_dict, edge_attr_dict)
-            else:
-                if hasattr(test_data, 'num_node_features') and hasattr(test_data, 'edge_attr'):
-                    if (self.gnn_model.in_channels != test_data.num_node_features or 
-                        self.gnn_model.edge_dim != test_data.edge_attr.shape[1]):
-                        print("Updating GNN model dimensions...")
-                        self.gnn_model = ImprovedEdgeGraphSAGE(
-                            in_channels=test_data.num_node_features,
-                            hidden_channels=self.gnn_params.get('hidden_channels', 128),
-                            out_channels=2,
-                            edge_dim=test_data.edge_attr.shape[1],
-                            dropout=self.gnn_params.get('dropout', 0.1)
-                        ).to(DEVICE)
-                _ = self.gnn_model(test_data.x, test_data.edge_index, test_data.edge_attr)
+            # Sample a small batch for warm-up
+            warmup_indices = all_edge_indices[:min(10, len(all_edge_indices))]
+            predictions, probabilities = self.gnn_wrapper.inference_with_subgraph_sampling(
+                self.gnn_model, test_data, warmup_indices, batch_size=5
+            )
         
         # Time multiple inference runs
         inference_times = []
-        for _ in range(num_runs):
+        for run in range(num_runs):
+            print(f"Running inference batch {run+1}/{num_runs}...")
             start_time = time.time()
+            
             with torch.no_grad():
-                if isinstance(self.gnn_model, HeterogeneousEdgeGraphSAGE):
-                    # Handle heterogeneous graph
-                    print("Using heterogeneous GNN model...")
-                    # Use the wrapper's heterogeneous data creation method
-                    x_dict, edge_index_dict, edge_attr_dict = self.gnn_wrapper._create_heterogeneous_data(test_data, DEVICE)
-                    out = self.gnn_model(x_dict, edge_index_dict, edge_attr_dict)
-                else:
-                    # Handle homogeneous graph
-                    print("Using homogeneous GNN model...")
-                    out = self.gnn_model(test_data.x, test_data.edge_index, test_data.edge_attr)
+                predictions, probabilities = self.gnn_wrapper.inference_with_subgraph_sampling(
+                    self.gnn_model, test_data, all_edge_indices, batch_size=50
+                )
+            
             end_time = time.time()
             inference_times.append(end_time - start_time)
         
@@ -372,17 +365,11 @@ class ModelEvaluator:
         print(f"Average time per sample: {avg_time_per_sample:.6f} seconds")
         print(f"Throughput: {num_samples / avg_inference_time:.1f} samples/second")
         
-        # Final prediction for metrics
+        # Get final predictions for metrics
+        print("Computing final predictions for metrics...")
         with torch.no_grad():
-            if isinstance(self.gnn_model, HeterogeneousEdgeGraphSAGE):
-                x_dict, edge_index_dict, edge_attr_dict = self.gnn_wrapper._create_heterogeneous_data(test_data, DEVICE)
-                out = self.gnn_model(x_dict, edge_index_dict, edge_attr_dict)
-            else:
-                out = self.gnn_model(test_data.x, test_data.edge_index, test_data.edge_attr)
-            
-            predictions = torch.softmax(out, dim=1)
-            y_pred_proba = predictions[:, 1].cpu().numpy()
-            y_pred = torch.argmax(predictions, dim=1).cpu().numpy()
+            y_pred_proba = probabilities
+            y_pred = (y_pred_proba > 0.5).astype(int)
             y_test = test_data.edge_labels.cpu().numpy()
         
         # Calculate metrics
