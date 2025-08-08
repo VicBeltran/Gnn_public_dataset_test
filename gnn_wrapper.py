@@ -1136,8 +1136,12 @@ class GNNTrainingWrapper:
                 }
             else:
                 # Create feature tensors for the nodes in the subgraph
+                # Move tensors to CPU first for numpy indexing
+                source_nodes_original_cpu = source_nodes_original.cpu().numpy()
+                target_nodes_original_cpu = target_nodes_original.cpu().numpy()
+                
                 source_features_subgraph = torch.tensor(
-                    self.source_features[source_nodes_original], 
+                    self.source_features[source_nodes_original_cpu], 
                     dtype=torch.float
                 ).to(device)
                 
@@ -1146,7 +1150,7 @@ class GNNTrainingWrapper:
                     source_features_subgraph = source_features_subgraph.unsqueeze(0)
                 
                 target_features_subgraph = torch.tensor(
-                    self.target_features[target_nodes_original], 
+                    self.target_features[target_nodes_original_cpu], 
                     dtype=torch.float
                 ).to(device)
                 
@@ -1251,41 +1255,41 @@ class GNNTrainingWrapper:
             
             # Create edge index tensors for each type
             if source_to_source_edges:
-                src_src_indices = torch.tensor([[e[0], e[1]] for e in source_to_source_edges], dtype=torch.long).t()
+                src_src_indices = torch.tensor([[e[0], e[1]] for e in source_to_source_edges], dtype=torch.long).t().to(device)
                 edge_index_dict[('source', 'to', 'source')] = src_src_indices
                 edge_attr_dict[('source', 'to', 'source')] = data.edge_attr[[e[2] for e in source_to_source_edges]]
             
             if target_to_target_edges:
-                tgt_tgt_indices = torch.tensor([[e[0], e[1]] for e in target_to_target_edges], dtype=torch.long).t()
+                tgt_tgt_indices = torch.tensor([[e[0], e[1]] for e in target_to_target_edges], dtype=torch.long).t().to(device)
                 edge_index_dict[('target', 'to', 'target')] = tgt_tgt_indices
                 edge_attr_dict[('target', 'to', 'target')] = data.edge_attr[[e[2] for e in target_to_target_edges]]
             
             if source_to_target_edges:
-                src_tgt_indices = torch.tensor([[e[0], e[1]] for e in source_to_target_edges], dtype=torch.long).t()
+                src_tgt_indices = torch.tensor([[e[0], e[1]] for e in source_to_target_edges], dtype=torch.long).t().to(device)
                 edge_index_dict[('source', 'to', 'target')] = src_tgt_indices
                 edge_attr_dict[('source', 'to', 'target')] = data.edge_attr[[e[2] for e in source_to_target_edges]]
             
             if target_to_source_edges:
-                tgt_src_indices = torch.tensor([[e[0], e[1]] for e in target_to_source_edges], dtype=torch.long).t()
+                tgt_src_indices = torch.tensor([[e[0], e[1]] for e in target_to_source_edges], dtype=torch.long).t().to(device)
                 edge_index_dict[('target', 'to', 'source')] = tgt_src_indices
                 edge_attr_dict[('target', 'to', 'source')] = data.edge_attr[[e[2] for e in target_to_source_edges]]
             
             # Create empty tensors for missing edge types
             if ('source', 'to', 'source') not in edge_index_dict:
-                edge_index_dict[('source', 'to', 'source')] = torch.empty((2, 0), dtype=torch.long)
-                edge_attr_dict[('source', 'to', 'source')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float)
+                edge_index_dict[('source', 'to', 'source')] = torch.empty((2, 0), dtype=torch.long).to(device)
+                edge_attr_dict[('source', 'to', 'source')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float).to(device)
             
             if ('target', 'to', 'target') not in edge_index_dict:
-                edge_index_dict[('target', 'to', 'target')] = torch.empty((2, 0), dtype=torch.long)
-                edge_attr_dict[('target', 'to', 'target')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float)
+                edge_index_dict[('target', 'to', 'target')] = torch.empty((2, 0), dtype=torch.long).to(device)
+                edge_attr_dict[('target', 'to', 'target')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float).to(device)
             
             if ('source', 'to', 'target') not in edge_index_dict:
-                edge_index_dict[('source', 'to', 'target')] = torch.empty((2, 0), dtype=torch.long)
-                edge_attr_dict[('source', 'to', 'target')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float)
+                edge_index_dict[('source', 'to', 'target')] = torch.empty((2, 0), dtype=torch.long).to(device)
+                edge_attr_dict[('source', 'to', 'target')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float).to(device)
             
             if ('target', 'to', 'source') not in edge_index_dict:
-                edge_index_dict[('target', 'to', 'source')] = torch.empty((2, 0), dtype=torch.long)
-                edge_attr_dict[('target', 'to', 'source')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float)
+                edge_index_dict[('target', 'to', 'source')] = torch.empty((2, 0), dtype=torch.long).to(device)
+                edge_attr_dict[('target', 'to', 'source')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float).to(device)
         else:
             # Using full graph - create all edge types from the original edge_index
             edge_index = data.edge_index
@@ -1345,20 +1349,20 @@ class GNNTrainingWrapper:
             
             # Create empty tensors for missing edge types
             if ('source', 'to', 'source') not in edge_index_dict:
-                edge_index_dict[('source', 'to', 'source')] = torch.empty((2, 0), dtype=torch.long)
-                edge_attr_dict[('source', 'to', 'source')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float)
+                edge_index_dict[('source', 'to', 'source')] = torch.empty((2, 0), dtype=torch.long).to(device)
+                edge_attr_dict[('source', 'to', 'source')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float).to(device)
             
             if ('target', 'to', 'target') not in edge_index_dict:
-                edge_index_dict[('target', 'to', 'target')] = torch.empty((2, 0), dtype=torch.long)
-                edge_attr_dict[('target', 'to', 'target')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float)
+                edge_index_dict[('target', 'to', 'target')] = torch.empty((2, 0), dtype=torch.long).to(device)
+                edge_attr_dict[('target', 'to', 'target')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float).to(device)
             
             if ('source', 'to', 'target') not in edge_index_dict:
-                edge_index_dict[('source', 'to', 'target')] = torch.empty((2, 0), dtype=torch.long)
-                edge_attr_dict[('source', 'to', 'target')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float)
+                edge_index_dict[('source', 'to', 'target')] = torch.empty((2, 0), dtype=torch.long).to(device)
+                edge_attr_dict[('source', 'to', 'target')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float).to(device)
             
             if ('target', 'to', 'source') not in edge_index_dict:
-                edge_index_dict[('target', 'to', 'source')] = torch.empty((2, 0), dtype=torch.long)
-                edge_attr_dict[('target', 'to', 'source')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float)
+                edge_index_dict[('target', 'to', 'source')] = torch.empty((2, 0), dtype=torch.long).to(device)
+                edge_attr_dict[('target', 'to', 'source')] = torch.empty((0, data.edge_attr.size(1)), dtype=torch.float).to(device)
         
         return x_dict, edge_index_dict, edge_attr_dict
 
